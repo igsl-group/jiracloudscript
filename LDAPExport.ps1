@@ -35,7 +35,7 @@
 	Base DN to bind to.
 	
 .PARAMETER Filter
-	LDAP filter. Default is (objectClass=user).
+	LDAP filter. Default is (&(objectClass=User)(mail=*)).
 	
 .PARAMETER Scope
 	LDAP search scope. Valid values are Base, OneLevel or Subtree. Default is Subtree.
@@ -91,7 +91,7 @@ Param(
 	[string] $BaseDN,
 	
 	[Parameter(ParameterSetName = "Export")]
-	[string] $Filter = "(objectClass=User)",
+	[string] $Filter = "(&(objectClass=User)(mail=*))",
 	
 	[Parameter(ParameterSetName = "Export")]
 	[ValidateSet("Base", "OneLevel", "Subtree")]
@@ -146,8 +146,8 @@ if ($Cred) {
 	)
 	# Search
 	$Searcher = New-Object System.DirectoryServices.DirectorySearcher($LDAP)
-	$Searcher.SearchScope = "Subtree"
-	$Searcher.Filter = "(objectClass=user)"
+	$Searcher.SearchScope = $Scope
+	$Searcher.Filter = $Filter
 	foreach ($Attr in $AttributeList) {
 		[void] $Searcher.PropertiesToLoad.Add($Attr)
 	}
@@ -155,18 +155,13 @@ if ($Cred) {
 	Set-Content -Path $Out -NoNewLine -Value ""
 	[int] $Count = 0
 	foreach ($User in $Searcher.FindAll()) {
-		if ($User.Properties."$Mail") {
-			$Data = ""
-			foreach ($Attr in $AttributeList) {
-				$Data += $Attr + "=`"" + $User.Properties."$Attr" + "`"|"
-			}
-			$Data += "|"
-			$Count++
-			Add-Content -Path $Out -NoNewline -Value $Data
-		} else {
-			$LoginID = $User.Properties."$SAMAccountName"
-			Write-Output "$LoginID has no $Mail attribute, user is ignored"
+		$Data = ""
+		foreach ($Attr in $AttributeList) {
+			$Data += $Attr + "=`"" + $User.Properties."$Attr" + "`"|"
 		}
+		$Data += "|"
+		$Count++
+		Add-Content -Path $Out -NoNewline -Value $Data
 	}
 	Write-Output "$Count user(s) written to $Out"
 }
