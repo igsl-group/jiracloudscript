@@ -48,6 +48,11 @@
 	For -Export, default is LDAPExport.txt.
 	For -Cred, default is LDAPExport.cred.
 
+.EXAMPLE
+	.\LDAPExport.ps1 -Cred -UserName Administrator
+	
+.EXAMPLE
+	.\LDAPExport.ps1 -Export -Server 192.168.56.120 -Port 389 -BaseDN "CN=Users,DC=win2022,DC=kcwong,DC=igsl" -Filter "(objectClass=user)" -Scope Subtree -Attributes distinguishedName,phone,mobile,title,department
 #>
 Param(
 	# Cred
@@ -93,7 +98,7 @@ Param(
 	[string] $Scope = "Subtree",
 	
 	[Parameter(ParameterSetName = "Export")]
-	[string[]] $Attributes = @("sAMAccountName", "mail"),
+	[string[]] $Attributes = @(),
 	
 	# Common
 	[Parameter(ParameterSetName = "Export")]
@@ -125,9 +130,12 @@ if ($Cred) {
 	foreach ($Attr in $Attributes) {
 		[void] $AttributeList.Add($Attr.ToLower())
 	}
-	# Always include mail
+	# Always include attributes
 	if (-not $AttributeList.Contains($Mail)) {
 		[void] $AttributeList.Add($Mail)
+	}
+	if (-not $AttributeList.Contains($SAMAccountName)) {
+		[void] $AttributeList.Add($SAMAccountName)
 	}
 	# Get credential
 	$c = Import-Clixml -Path $CredFile
