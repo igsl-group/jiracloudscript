@@ -13,4 +13,4 @@ UpdateGroupMembership.csv is a sample data file.
 
 ## LDAPExport.ps1
 This script is used to export LDAP data into a delimited format. 
-Jira automation rule can grab the exported data with a web request and parse it using tokenizer.
+Jira automation rule can grab the exported data with a web request and parse it using split.
