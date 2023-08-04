@@ -15,6 +15,13 @@
 	
 	Format of export data is: 
 	[Attribute Name]="[Attribute Value]"|[... more attributes]||[... more users]
+
+	You can also export LDAP server certificate chain: 
+	.\LDAPExport.ps1 -Cert -Server [LDAP Server Name] -Port [LDAP Server Port]
+	The whole certificate chain will be written to separate .cer files. File name is determined by certificate's DNS name.
+	
+.PARAMETER Cert
+	Certificate mode. Retrieves server certificate from LDAP server.
 	
 .PARAMETER Cred
 	Creates a credential file to protect user name and password.
@@ -45,47 +52,45 @@
 	
 .PARAMETER Out
 	Path of output file. File will be overwritten.
-	For -Export, default is LDAPExport.txt.
-	For -Cred, default is LDAPExport.cred.
+	For -Export, default is [Server Name].export.
+	For -Cred, default is [Server Name].cred.
 
 .EXAMPLE
-	.\LDAPExport.ps1 -Cred -UserName Administrator
+	.\LDAPExport.ps1 -Cert -Server 192.168.56.120 -Port 636
+
+.EXAMPLE
+	.\LDAPExport.ps1 -Cred -Server 192.168.56.120 -UserName Administrator
 	
 .EXAMPLE
 	.\LDAPExport.ps1 -Export -Server 192.168.56.120 -Port 389 -BaseDN "CN=Users,DC=win2022,DC=kcwong,DC=igsl" -Filter "(objectClass=user)" -Scope Subtree -Attributes distinguishedName,phone,mobile,title,department
 #>
 Param(
+	# Cert
+	[Parameter(Mandatory, ParameterSetName = "Certificate")]
+	[switch] $Cert,
+	
 	# Cred
-	[Parameter(Mandatory, ParameterSetName = "CreateCredential")]
+	[Parameter(Mandatory, ParameterSetName = "Credential")]
 	[switch] $Cred,
 	
-	[Parameter(Mandatory, ParameterSetName = "CreateCredential")]
+	[Parameter(Mandatory, ParameterSetName = "Credential")]
 	[string] $UserName,
 	
 	# Export
 	[Parameter(Mandatory, ParameterSetName = "Export")]
 	[switch] $Export,
 	
+	[Parameter(Mandatory, ParameterSetName = "Credential")]
+	[Parameter(Mandatory, ParameterSetName = "Certificate")]
 	[Parameter(ParameterSetName = "Export")]
 	[string] $Server = "127.0.0.1",
 
+	[Parameter(Mandatory, ParameterSetName = "Certificate")]
 	[Parameter(ParameterSetName = "Export")] 
 	[int] $Port = 389,
 	
 	[Parameter(ParameterSetName = "Export")]
-	[ValidateScript({
-		if (Test-Path -PathType Leaf $_) {
-			$c = Import-Clixml -Path $_
-			if ($c.UserName -and $c.Password) {
-				$true
-			} else {
-				throw "Please provide valid credential file"
-			}
-		} else {
-			throw "Please provide path to credential file"
-		}
-	})]
-	[string] $CredFile = "LDAPExport.cred",
+	[string] $CredFile,
 	
 	[Parameter(Mandatory, ParameterSetName = "Export")]
 	[string] $BaseDN,
@@ -102,21 +107,60 @@ Param(
 	
 	# Common
 	[Parameter(ParameterSetName = "Export")]
-	[Parameter(ParameterSetName = "CreateCredential")]
-	[string] $Out = $(
-		if ($Export) {
-			"LDAPExport.txt"
-		} elseif ($Cred) {
-			"LDAPExport.cred"
-		}
-	)
+	[Parameter(ParameterSetName = "Credential")]
+	[string] $Out
 )
 
 # Constants
 Set-Variable -Name SAMAccountName -Value "samaccountname" -Option Constant
 Set-Variable -Name Mail -Value "mail" -Option Constant
+Set-Variable -Name CredExt -Value ".cred" -Option Constant
+Set-Variable -Name ExportExt -Value ".export" -Option Constant
 
-if ($Cred) {
+function ExportCert {
+	Param (
+		[X509Certificate] $Certificate
+	)
+	$Name = $Certificate.GetNameInfo("dnsName", $false) + ".cer"
+	Export-Certificate -Cert $Certificate -FilePath $Name -Type CERT | Out-Null
+	$Name
+}
+
+if ($Cert) {
+	# Get server certificate
+	try {
+		$TcpSocket = New-Object Net.Sockets.TcpClient($Server, $Port)
+		$TcpStream = $TcpSocket.GetStream()
+		$Callback = {
+			Param(
+				$sender,
+				$cert,
+				$chain,
+				$errors
+			) 
+			return $true
+		}
+		$SSLStream = New-Object -TypeName System.Net.Security.SSLStream -ArgumentList @($TcpStream, $True, $Callback)
+		try {
+			$SSLStream.AuthenticateAsClient($Server)
+			$Certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
+			$Chain = new-object security.cryptography.x509certificates.x509chain
+			[void] $chain.Build($Certificate)
+			Write-Output "Certificate chain written to: "
+			$Chain.ChainElements | %{
+				$Name = ExportCert $_.Certificate
+				Write-Output $Name
+			}
+		} finally {
+			$SSLStream.Dispose()
+		}
+	} finally {
+		$TCPSocket.Dispose()
+	}
+} elseif ($Cred) {
+	if (-not $Out) {
+		$Out = $Server + $CredExt
+	}
 	# Get password and save as credential file
 	$c = Get-Credential -UserName $UserName -Message "Test"
 	if ($c.UserName -and $c.Password) {
@@ -126,6 +170,12 @@ if ($Cred) {
 		Write-Output "Credential not supplied"
 	}
 } elseif ($Export) {
+	if (-not $Out) {
+		$Out = $Server + $ExportExt
+	}
+	if (-not $CredFile) {
+		$CredFile = $Server + $CredExt
+	}
 	$AttributeList = [System.Collections.ArrayList]::new()
 	foreach ($Attr in $Attributes) {
 		[void] $AttributeList.Add($Attr.ToLower())
@@ -138,30 +188,38 @@ if ($Cred) {
 		[void] $AttributeList.Add($SAMAccountName)
 	}
 	# Get credential
-	$c = Import-Clixml -Path $CredFile
-	$LDAP = New-Object System.DirectoryServices.DirectoryEntry( `
-		"LDAP://${Server}:${Port}/${BaseDN}", `
-		$c.UserName, `
-		([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($c.Password))) `
-	)
-	# Search
-	$Searcher = New-Object System.DirectoryServices.DirectorySearcher($LDAP)
-	$Searcher.SearchScope = $Scope
-	$Searcher.Filter = $Filter
-	foreach ($Attr in $AttributeList) {
-		[void] $Searcher.PropertiesToLoad.Add($Attr)
-	}
-	# For all results
-	Set-Content -Path $Out -NoNewLine -Value ""
-	[int] $Count = 0
-	foreach ($User in $Searcher.FindAll()) {
-		$Data = ""
-		foreach ($Attr in $AttributeList) {
-			$Data += $Attr + "=`"" + $User.Properties."$Attr" + "`"|"
+	if (Test-Path -Type Leaf $CredFile) {
+		$c = Import-Clixml -Path $CredFile
+		if ($c.UserName -and $c.Password) {
+			$LDAP = New-Object System.DirectoryServices.DirectoryEntry( `
+				"LDAP://${Server}:${Port}/${BaseDN}", `
+				$c.UserName, `
+				([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($c.Password))) `
+			)
+			# Search
+			$Searcher = New-Object System.DirectoryServices.DirectorySearcher($LDAP)
+			$Searcher.SearchScope = $Scope
+			$Searcher.Filter = $Filter
+			foreach ($Attr in $AttributeList) {
+				[void] $Searcher.PropertiesToLoad.Add($Attr)
+			}
+			# For all results
+			Set-Content -Path $Out -NoNewLine -Value ""
+			[int] $Count = 0
+			foreach ($User in $Searcher.FindAll()) {
+				$Data = ""
+				foreach ($Attr in $AttributeList) {
+					$Data += $Attr + "=`"" + $User.Properties."$Attr" + "`"|"
+				}
+				$Data += "|"
+				$Count++
+				Add-Content -Path $Out -NoNewline -Value $Data
+			}
+			Write-Output "$Count user(s) written to $Out"
+		} else {
+			Write-Output "$CredFile is not a valid credential file"
 		}
-		$Data += "|"
-		$Count++
-		Add-Content -Path $Out -NoNewline -Value $Data
+	} else {
+		Write-Output "Credential file $CredFile does not exist"
 	}
-	Write-Output "$Count user(s) written to $Out"
 }
