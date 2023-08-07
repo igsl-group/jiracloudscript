@@ -264,12 +264,15 @@ function CreateResult {
 	switch ($Result) {
 		([ResultType]::OK) {
 			$script:ActionSuccess++
+			break
 		}
 		([ResultType]::ERR) {
 			$script:ActionError++
+			break
 		}
 		([ResultType]::WARN) {
 			$script:ActionWarning++
+			break
 		}
 	}
 	$Obj
