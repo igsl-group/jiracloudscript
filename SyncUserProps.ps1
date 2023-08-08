@@ -1,5 +1,5 @@
 <#
-.SYNOPSIS
+.SYNOPSIS 
 	Synchronize LDAP user attributes to user properties in Jira Cloud.
 	
 	A. LDAP Server Certficate 
