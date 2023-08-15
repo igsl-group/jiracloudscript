@@ -141,7 +141,7 @@
 	Delete user property. Please note that the action is not reversible.
 #>
 Param(
-	# Switch	
+	# Switch
 	[Parameter(Mandatory, ParameterSetName = "LdapCred")]
 	[switch] $LdapCred,
 		
@@ -249,18 +249,6 @@ function WriteCred {
 		Export-Clixml -Path $Out -InputObject $c
 	} else {
 		throw "Cancelled by user"
-	}
-}
-
-function ReadCred {
-	param (
-		[string] $FileName
-	)
-	$c = Import-Clixml -Path $FileName
-	if ($c.UserName -and $c.Password) {
-		$c
-	} else {
-		throw "Credential file $FileName is invalid"
 	}
 }
 
