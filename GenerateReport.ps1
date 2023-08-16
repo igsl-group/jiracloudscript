@@ -52,7 +52,7 @@
 	
 .PARAMETER ReportType
 	Report template to use.
-	Valid values: MasterDataReport
+	Valid values: MasterDataReport|QuestionnaireReport
 	
 .PARAMETER DateRange
 	JQL clause to limit issues exported. Default is empty (no limit).
@@ -141,15 +141,14 @@ class RestException : Exception {
 
 enum ReportType {
 	MasterDataReport = 1
+	QuestionnaireReport = 2
 }
 
 class ReportTypeData {
 	[string] $Name
 	[string] $Jql
 	[string[]] $Fields 
-	[int] $Value
-	ReportTypeData([int] $Value, [string] $Name, [string] $Jql, [string[]] $Fields) {
-		$this.Value = $Value
+	ReportTypeData([string] $Name, [string] $Jql, [string[]] $Fields) {
 		$this.Name = $Name
 		$this.Jql = $Jql
 		$this.Fields = $Fields
@@ -157,8 +156,7 @@ class ReportTypeData {
 }
 
 $ReportTypeMap = @{
-	[ReportType]::MasterDataReport.ToString() = [ReportTypeData]::new(
-		([ReportType]::MasterDataReport), 
+	[ReportType]::MasterDataReport.value__ = [ReportTypeData]::new(
 		"Master Data Report", 
 		"Project = `"Customer Service Request`" Order By Created Desc",
 		@(
@@ -184,9 +182,46 @@ $ReportTypeMap = @{
 			"customfield_10081", # Rejection Category
 			"customfield_10074", # Request Category
 			"customfield_10089", # Requester
-			"customfield_10076" # System Owner Approval(s) Uploaded
+			"customfield_10076"  # System Owner Approval(s) Uploaded
 		)
 	);
+	[ReportType]::QuestionnaireReport.value__ = [ReportTypeData]::new(
+		"Questionnaire Report", 
+		"Project = `"Customer Service Request`" and Status = Closed Order By Created Desc",
+		@(
+			"summary",
+			"status",
+			"assignee",
+			"reporter",
+			"creator",
+			"created",
+			"customfield_10069", # IT Security Risk Management
+			"customfield_10098", # Application
+			"customfield_10062", # Business Justification
+			"customfield_10064", # Business Value (HKD)
+			"customfield_10065", # Contact Number
+			"customfield_10066", # Department
+			"customfield_10068", # Expected Deadline
+			"customfield_10092", # Man-day
+			"customfield_10088", # Owner Group
+			"customfield_10072", # Planned Finish Date
+			"customfield_10087", # Regulatory
+			"customfield_10081", # Rejection Category
+			"customfield_10074", # Request Category
+			"customfield_10089", # Requester
+			"customfield_10076", # System Owner Approval(s) Uploaded
+			"customfield_10093", # Overall Satisfaction Rate
+			"customfield_10094", # End Result Meet User Requirements
+			"customfield_10095", # Response Rate
+			"customfield_10096", # Completed On or Before Agreed Timeline
+			"customfield_10097"  # Other Comments
+		)
+	);
+}
+
+function AnyKeyToContinue {
+	Write-Host "Press Any Key to Continue"
+	$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
 }
 
 function SelectFields {
@@ -678,7 +713,7 @@ function ParseFieldValue {
 				break
 			}
 			"user" {
-				$Result = $FieldValue."displayName" + " (" + $FieldValue."accountId" + ")"
+				$Result = $FieldValue."displayName" + " [" + $FieldValue."accountId" + "]"
 				break
 			}
 			"version" {
@@ -690,7 +725,7 @@ function ParseFieldValue {
 				if ($Response.StatusCode -eq 200) {
 					$Json = $Response.Content | ConvertFrom-Json
 					foreach ($Watcher in $Json.voters) {
-						$Result += "," + $Watcher.displayName + " (" + $Watcher.accountId + ")" 
+						$Result += "," + $Watcher.displayName + " [" + $Watcher.accountId + "]"
 					}
 					if ($Result.Length -gt 1) {
 						$Result = $Result.Substring(1)
@@ -705,7 +740,7 @@ function ParseFieldValue {
 				if ($Response.StatusCode -eq 200) {
 					$Json = $Response.Content | ConvertFrom-Json
 					foreach ($Watcher in $Json.watchers) {
-						$Result += "," + $Watcher.displayName + " (" + $Watcher.accountId + ")" 
+						$Result += "," + $Watcher.displayName + " [" + $Watcher.accountId + "]"
 					}
 					if ($Result.Length -gt 1) {
 						$Result = $Result.Substring(1)
@@ -792,23 +827,38 @@ function GetAuthHeader {
 }
 
 function SelectReport {
-	Clear-Host
-	Write-Host ================================================================================
-	Write-Host Select Report
-	Write-Host ================================================================================
-	foreach ($Report in ($ReportTypeMap.GetEnumerator() | Sort-Object)) {
-		$ReportName = $Report.Value.Name
-		$ReportValue = $Report.Value.Value
-		$ReportJQL = $Report.Value.Jql
-		Write-Host [$ReportValue] $ReportName
-	}
-	Write-Host ================================================================================
-	try {
+	$Result = $null
+	$Stop = $false
+	$Max = [ReportType].GetEnumValues().Count
+	do {
+		Clear-Host
+		Write-Host ================================================================================
+		Write-Host Select Report
+		Write-Host ================================================================================
+		foreach ($Item in ($ReportTypeMap.GetEnumerator() | Sort-Object)) {
+			$Key = $Item.Key
+			$ReportName = $Item.Value.Name
+			Write-Host "[${Key}] ${ReportName}"
+		}
+		Write-Host "[X] Exit"
+		Write-Host ================================================================================
 		$Option = Read-Host Select Report
-		[ReportType] $Option
-	} catch {
-		$null
-	}
+		switch ($Option) {
+			"x" {
+				$Result = $null
+				$Stop = $true
+				break
+			}
+			{$_ -match "[0-9]+"} {
+				if ($Option -gt 0 -and $Option -le $Max) {
+					$Result = $Option
+					$Stop = $true
+				}
+				break
+			}
+		}		
+	} while (-not $Stop)
+	$Result
 }
 
 function PrintMenu {
@@ -839,11 +889,6 @@ function PrintMenu {
 	}
 }
 
-function AnyKeyToContinue {
-	Write-Host "Press Any Key to Continue"
-	$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
-}
-
 function GetReportOutput {
 	param (
 		[string] $OutParam,
@@ -868,7 +913,8 @@ function WriteReport {
 	param (
 		[string] $MainJql,
 		[string] $ExtraJql,
-		[string[]] $FieldList
+		[string[]] $FieldList,
+		[string] $Out
 	)
 	try {
 		$Headers = GetAuthHeader
@@ -885,8 +931,11 @@ function WriteReport {
 		} else {
 			$FinalJQL = $MainJql
 		}
-		Write-Host "JQL: `"$FinalJQL`""
-		Write-Host "Fields: `"$FieldNames`""
+		Write-Host
+		Write-Host "JQL: $FinalJQL"
+		Write-Host "Fields: $FieldNames"
+		Write-Host "Output: ${Out}"
+		Write-Host
 		$WriteHeader = $true
 		do {
 			$Json = SearchIssue $Headers $FinalJQL $FieldList $Max $Start
@@ -932,7 +981,7 @@ if ($JiraCred) {
 # Query mode
 if ($Query) {
 	$Out = GetReportOutput $Out
-	WriteReport $Jql $DateRange $Fields
+	WriteReport $Jql $DateRange $Fields $Out
 	Exit
 }
 
@@ -944,7 +993,7 @@ if ($Report) {
 		$FieldString = $Fields -join ","
 		$ReportName = $ReportTypeMap.Item($ReportType).Name
 		$Out = GetReportOutput $null $ReportName $ReportDir
-		WriteReport $Jql $DateRange $Fields
+		WriteReport $Jql $DateRange $Fields $Out
 		Exit 0
 	} else {
 		Write-Host "Report type `"$ReportType`" is not valid"
@@ -1010,15 +1059,15 @@ do {
 			break
 		}
 		"r" {
-			$ReportType = SelectReport
-			$Jql = $ReportTypeMap.Item($ReportType).Jql
-			$Fields = $ReportTypeMap.Item($ReportType).Fields
-			$ReportName = $ReportTypeMap.Item($ReportType).Name
+			[int] $ReportIdx = SelectReport
+			$Jql = $ReportTypeMap.Item($ReportIdx).Jql
+			$Fields = $ReportTypeMap.Item($ReportIdx).Fields
+			$ReportName = $ReportTypeMap.Item($ReportIdx).Name
 			break
 		}
 		"s" {
 			$Out = GetReportOutput $null $ReportName $ReportDir
-			WriteReport $Jql $DateRange $Fields
+			WriteReport $Jql $DateRange $Fields $Out
 			AnyKeyToContinue
 			break
 		}
