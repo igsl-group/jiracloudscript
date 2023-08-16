@@ -1,36 +1,132 @@
 <#
 .SYNOPSIS
 	Generate report as CSV file.
+	
+.DESCRIPTION
+	Export issues from Jira Cloud. 
+	
+	Create Credential File Mode
+	===========================
+	> .\GenerateReport.ps1 -JiraCred -Domain <Domain> -UserEmail <User Email> -Out <Credential File>
+	You will be prompted to enter API token. 
+	The created credential file can then be used in the other modes.
+	
+	Interactive Mode
+	================
+	> .\GenerateReport.ps1
+	An interactive menu will be displayed to generate reports. 
+	
+	Query Mode
+	==========
+	> .\GenerateReport.ps1 -Query [-Domain <Domain>] [-JiraCredFile <Credential File>] -Jql <JQL> [-Fields <Fields>] [-Out <Output File>]
+	Generate report using provided JQL.
+	
+	Report Mode
+	===========
+	> .\GenerateReport.ps1 -Report -ReportType <Report Type> -DateRange <Date Range JQL> [-ReportDir <Output Directory>]
+	Generate report using report templates.
+	
+	Output is saved in a CSV file:
+		1. File encoding is UTF-8 without byte order mark.
+		2. First line is header row.
+		3. issue key will always appear as the first column.
+	
+.PARAMETER JiraCred
+	Create credential file mode.
+	
+.PARAMETER Query
+	Generate report with specified JQL.
+	
+.PARAMETER Report
+	Generate report using specified template.
+	
+.PARAMETER UserEmail
+	Email address of user. Please note that issues that can be found depends on access rights of this user.
+
+.PARAMETER Domain
+	Jira Cloud domain. Default is: fbhkitsm.atlassian.net
+
+.PARAMETER JiraCredFile
+	Credential file to use. Default is: <Domain>.cred
+	Please note that you must use the same Windows user used to create the credential file to decrypt it.
+	
+.PARAMETER ReportType
+	Report template to use.
+	Valid values: MasterDataReport
+	
+.PARAMETER DateRange
+	JQL clause to limit issues exported. Default is empty (no limit).
+	
+.PARAMETER Jql
+	JQL used to search issues. Default is: Project = `"Customer Service Request`" Order by Created Desc
+
+.PARAMETER Fields
+	Issue fields to export. Default is: *navigable
+	Specify *navigable to export user-readable fields. 
+	Specify *all to export all fields.
+	Specify a list to export specific fields, e.g. @("summary", "description", "status", "assignee", "customfield_10068")
+	Note that issue key is always included even if you do not specify it.
+
+.PARAMETER ReportDir
+	Directory to write CSV file to. Default is current directory.
+
+.PARAMETER Out
+	Output file path. 
+	For -JiraCred, default is: <Domain>.cred
+	For -Query, default is: <Domain>.<yyyyMMddHHmmss>.csv
 #>
 [CmdletBinding(DefaultParameterSetName = "Interactive")]
 Param(
 	[Parameter(Mandatory, ParameterSetName = "JiraCred")]
 	[switch] $JiraCred,
 
-	[Parameter(Mandatory, ParameterSetName = "JiraCred")]
-	[string] $UserEmail,
-	
 	[Parameter(Mandatory, ParameterSetName = "Query")]
 	[switch] $Query,
 
+	[Parameter(Mandatory, ParameterSetName = "Report")]
+	[switch] $Report,
+
+	[Parameter(Mandatory, ParameterSetName = "JiraCred")]
+	[string] $UserEmail,
+	
+	[Parameter(Mandatory, ParameterSetName = "JiraCred")]
 	[Parameter(ParameterSetName = "Query")]
-	[string] $Domain = "kcwong.atlassian.net",
+	[Parameter(ParameterSetName = "Report")]
+	[string] $Domain = "fbhkitsm.atlassian.net",
 	
 	[Parameter(ParameterSetName="Query")]
+	[Parameter(ParameterSetName = "Report")]
 	[string] $JiraCredFile,
 	
+	[Parameter(Mandatory, ParameterSetName = "Report")]
+	[ValidateSet("MasterDataReport")]
+	[string] $ReportType,
+	
+	[Parameter(ParameterSetName = "Report")]
+	[string] $DateRange = "",
+	
 	[Parameter(Mandatory, ParameterSetName = "Query")]
-	[string] $Jql = "",
+	[string] $Jql = "Project = `"Customer Service Request`" Order by Created Desc",
 	
 	[Parameter(ParameterSetName = "Query")] 
-	[System.Collections.ArrayList] $Fields = @("*all"),
+	[System.Collections.ArrayList] $Fields = @("*navigable"),
 	
-	[Parameter(ParameterSetName = "JiraCred")]
+	[Parameter(ParameterSetName = "Report")]
+	[string] $ReportDir = ".",
+	
 	[Parameter(ParameterSetName = "Query")]
+	[Parameter(ParameterSetName = "JiraCred")]
 	[string] $Out
 )
 
 Set-Variable -Name CredExt -Value ".cred" -Option Constant
+Set-Variable -Name DateFormatIn -Value "yyyy-MM-dd" -Option Constant
+Set-Variable -Name DateFormatOut -Value "yyyy-MM-dd" -Option Constant
+Set-Variable -Name DatetimeFormatIn -Value "yyyy-MM-ddTHH:mm:ss.fffzzzz" -Option Constant
+Set-Variable -Name DatetimeFormatOut -Value "yyyy-MM-dd HH:mm:ss" -Option Constant
+
+# Name of report, set if a report type is selected
+$ReportName = $null
 
 # Sort Fields
 $Fields.Sort()
@@ -43,10 +139,54 @@ class RestException : Exception {
     }
 }
 
-class FieldNames : System.Management.Automation.IValidateSetValuesGenerator {
-    [string[]] GetValidValues() {
-        return [string[]] @("summary", "key", "assignee")
-    }
+enum ReportType {
+	MasterDataReport = 1
+}
+
+class ReportTypeData {
+	[string] $Name
+	[string] $Jql
+	[string[]] $Fields 
+	[int] $Value
+	ReportTypeData([int] $Value, [string] $Name, [string] $Jql, [string[]] $Fields) {
+		$this.Value = $Value
+		$this.Name = $Name
+		$this.Jql = $Jql
+		$this.Fields = $Fields
+	}
+}
+
+$ReportTypeMap = @{
+	[ReportType]::MasterDataReport.ToString() = [ReportTypeData]::new(
+		([ReportType]::MasterDataReport), 
+		"Master Data Report", 
+		"Project = `"Customer Service Request`" Order By Created Desc",
+		@(
+			"summary",
+			"status",
+			"assignee",
+			"reporter",
+			"creator",
+			"created",
+			"description",
+			"watches",
+			"customfield_10069", # IT Security Risk Management
+			"customfield_10098", # Application
+			"customfield_10062", # Business Justification
+			"customfield_10064", # Business Value (HKD)
+			"customfield_10065", # Contact Number
+			"customfield_10066", # Department
+			"customfield_10068", # Expected Deadline
+			"customfield_10092", # Man-day
+			"customfield_10088", # Owner Group
+			"customfield_10072", # Planned Finish Date
+			"customfield_10087", # Regulatory
+			"customfield_10081", # Rejection Category
+			"customfield_10074", # Request Category
+			"customfield_10089", # Requester
+			"customfield_10076" # System Owner Approval(s) Uploaded
+		)
+	);
 }
 
 function SelectFields {
@@ -56,6 +196,7 @@ function SelectFields {
 	)
 	# Get field information and create enum
 	$FieldInfo = GetFieldSchema $Headers
+	# Swap key and value for access
 	$FieldData = [ordered] @{}
 	foreach ($Item in $FieldInfo.GetEnumerator()) {
 		$FieldID = $Item.Key
@@ -86,7 +227,15 @@ function SelectFields {
 		$RemoveList = [System.Collections.ArrayList]::new()
 		Clear-Host
 		Write-Host "================================================================================"
-		Write-Host "Selected Fields (enter code to remove)"
+		Write-Host "Selected Fields"
+		Write-Host "================================================================================"
+		Write-Host "[C] Remove All Selected Fields"
+		if ($AddAll) {
+			Write-Host "[F] All Fields (*all)"
+		}
+		if ($AddNavigable) {
+			Write-Host "[N] Navigable Fields (*navigable)"
+		}
 		$Idx = 0
 		foreach ($Item in ($SelectedFields.GetEnumerator() | Sort-Object)) {
 			$Idx++
@@ -95,32 +244,39 @@ function SelectFields {
 			[void] $RemoveList.Add($FieldName)
 			Write-Host "[R${Idx}] ${FieldName} (${FieldID})"
 		}		
+		Write-Host
+		Write-Host "================================================================================"
+		Write-Host "Available Fields"
 		Write-Host "================================================================================"
 		Write-Host "[S] Search: ${SearchString}"
-		Write-Host "Available Fields (enter code to remove)"
+		if (-not $AddAll) {
+			Write-Host "[F] Add All Fields (*all)"
+		}
+		if (-not $AddNavigable) {
+			Write-Host "[N] Add Navigable Fields (*navigable)"
+		}
 		$Idx = 0
 		foreach ($Item in ($Matches.GetEnumerator() | Sort-Object)) {
 			$Idx++
 			$FieldName = $Item.Key
 			$FieldID = $Item.Value
 			[void] $AddList.Add($FieldName)
-			Write-Host "[A${Idx}] ${FieldName} (${FieldID})"
+			Write-Host "[${Idx}] ${FieldName} (${FieldID})"
 		}
+		Write-Host
 		Write-Host "================================================================================"
-		Write-Host "NOTE: Issue key is always written as first column"
-		Write-Host "================================================================================"
-		Write-Host "[L] Add All Fields: ${AddAll}"
-		Write-Host "[N] Add Navigable Fields: ${AddNavigable}"
-		Write-Host "[C] Remove All Selected Fields"
+		Write-Host "NOTE: Issue key is always included as the first column"
 		Write-Host "[X] Return"
 		Write-Host "================================================================================"
 		$Option = Read-Host "Option"
 		switch ($Option) {
 			"c" {
 				[void] $SelectedFields.Clear()
+				$AddAll = $false
+				$AddNavigable = $false
 				break
 			}
-			"l" {
+			"f" {
 				$AddAll = -not $AddAll
 				break
 			}
@@ -131,25 +287,32 @@ function SelectFields {
 			"s" {
 				$SearchString = Read-Host "Search String"
 				$SearchResult = $FieldData.Keys -like ("*" + $SearchString + "*")
+				$Matches.Clear()
 				foreach ($Key in $SearchResult) {
 					$Matches[$Key] = $FieldData[$Key]
 				}
 				break
 			}
-			{$_ -like "a*"} {
-				$Target = $Option.Substring(1)
-				$Name = $AddList[$Target - 1]
-				$ID = $Matches[$Name]
-				if (-not $SelectedFields.Contains($Name)) {
-					[void] $SelectedFields.Add($Name, $ID)
+			{$_ -match "[0-9]+"} {
+				$Target = $Option
+				$Cnt = $AddList.Count
+				if ($Target -gt 0 -and $Target -le $Cnt) {
+					$Name = $AddList[$Target - 1]
+					$ID = $Matches[$Name]
+					if (-not $SelectedFields.Contains($Name)) {
+						[void] $SelectedFields.Add($Name, $ID)
+					}
 				}
 				break
 			}
-			{$_ -like "r*"} {
+			{$_ -match "r[0-9]+"} {
 				$Target = $Option.Substring(1)
-				$Name = $RemoveList[$Target - 1]
-				if ($SelectedFields.Contains($Name)) {
-					[void] $SelectedFields.Remove($Name)
+				$Cnt = $RemoveList.Count
+				if ($Target -gt 0 -and $Target -le $Cnt) {
+					$Name = $RemoveList[$Target - 1]
+					if ($SelectedFields.Contains($Name)) {
+						[void] $SelectedFields.Remove($Name)
+					}
 				}
 				break
 			}
@@ -314,7 +477,7 @@ function WriteCSVHeader {
 	)
 	Set-Content -Path $Csv -Value "" -NoNewLine
 	$Line = ""
-	foreach ($Item in $Names.PSObject.Properties) {
+	foreach ($Item in ($Names.PSObject.Properties | Sort-Object)) {
 		$FieldName = $Item.Value
 		# Escape double quotes
 		$FieldName = $FieldName -Replace '"', '""'
@@ -328,11 +491,12 @@ function ParseDate {
 	param(
 		[PSObject] $Data
 	)
+	# PowerShell 7 will automatically convert dates, so check both types
 	if ($Data) {
 		if ($Data.GetType().Name -eq "date") {
-			$Data.ToString("yyyy-MM-dd")
+			$Data.ToString($DateFormatOut)
 		} else {
-			[datetime]::ParseExact($Data, "yyyy-MM-dd", $null).ToString("yyyy-MM-dd")
+			[datetime]::ParseExact($Data, $DateFormatIn, $null).ToString($DateFormatOut)
 		}
 	} else {
 		""
@@ -343,11 +507,14 @@ function ParseDateTime {
 	param(
 		[PSObject] $Data
 	)
+	# PowerShell 7 will automatically convert dates, so check both types
 	if ($Data) {
-		if ($Data.GetType().Name -eq "datetime") {
-			$Data.ToString("yyyy-MM-dd HH:mm:ss.fff")
+		if ($Data.GetType().Name -eq "date") {
+			$Data.ToString($DatetimeFormatOut)
+		} elseif ($Data.GetType().Name -eq "datetime") {
+			$Data.ToString($DatetimeFormatOut)
 		} else {
-			[datetime]::ParseExact($Data, "yyyy-MM-ddTHH:mm:ss.fffzzzz", $null).ToString("yyyy-MM-dd HH:mm:ss.fff")
+			[datetime]::ParseExact($Data, $DatetimeFormatIn, $null).ToString($DatetimeFormatOut)
 		}
 	} else {
 		""
@@ -582,7 +749,7 @@ function WriteCSVEntry {
 		[PSCustomObject] $Issue
 	)
 	$Line = ""
-	foreach ($Item in $Names.PSObject.Properties) {
+	foreach ($Item in ($Names.PSObject.Properties | Sort-Object)) {
 		$FieldId = $Item.Name
 		if ($Issue.fields."$FieldId") {
 			$FieldValue = $Issue.fields."$FieldId"
@@ -624,38 +791,12 @@ function GetAuthHeader {
 	$Headers
 }
 
-enum ReportType {
-	Type1 = 1	
-	Type2 = 2	
-	Type3 = 3
-}
-
-class ReportTypeData {
-	[string] $Name
-	[string] $Jql
-	[int] $Value
-	ReportTypeData([int] $Value, [string] $Name, [string] $Jql) {
-		$this.Name = $Name
-		$this.Jql = $Jql
-		$this.Value = $Value
-	}
-}
-
-$ReportTypeMap = @{
-	[ReportType]::Type1 = [ReportTypeData]::new(([ReportType]::Type1), "Type 1", "JQL 1");
-	[ReportType]::Type2 = [ReportTypeData]::new(([ReportType]::Type2), "Type 2", "JQL 2");
-	[ReportType]::Type3 = [ReportTypeData]::new(([ReportType]::Type3), "Type 3", "JQL 3");
-}
-
-$ReportTypeMap | Format-Table
-
 function SelectReport {
 	Clear-Host
 	Write-Host ================================================================================
 	Write-Host Select Report
 	Write-Host ================================================================================
-	$Sorted = $ReportTypeMap.GetEnumerator() | Sort-Object
-	foreach ($Report in $Sorted) {
+	foreach ($Report in ($ReportTypeMap.GetEnumerator() | Sort-Object)) {
 		$ReportName = $Report.Value.Name
 		$ReportValue = $Report.Value.Value
 		$ReportJQL = $Report.Value.Jql
@@ -672,15 +813,20 @@ function SelectReport {
 
 function PrintMenu {
 	Clear-Host
-	$FieldList = $Fields -join ", "
+	$FieldCount = $Fields.Count
 	Write-Host ================================================================================
 	Write-Host Generate Report
-	Write-Host ================================================================================
+	Write-Host --------------------------------------------------------------------------------
 	Write-Host "[D] Domain          | ${Domain}"
 	Write-Host "[C] Credential File | ${JiraCredFile}"
+	Write-Host --------------------------------------------------------------------------------
 	Write-Host "[R] Select Report   |"
 	Write-Host "[J] JQL             | ${Jql}"
-	Write-Host "[F] Output Fields   | ${FieldList}"       
+	Write-Host "[T] Date Range      | ${DateRange}"
+	Write-Host "[F] Output Fields   | ${FieldCount} Field(s)"
+	Write-Host "[N] Report Name     | ${ReportName}" 
+	Write-Host "[P] Output Directory| ${ReportDir}"
+	Write-Host --------------------------------------------------------------------------------
 	Write-Host "[S] Search          |"
 	Write-Host "[X] Exit            |"
 	Write-Host ================================================================================
@@ -693,41 +839,120 @@ function PrintMenu {
 	}
 }
 
+function AnyKeyToContinue {
+	Write-Host "Press Any Key to Continue"
+	$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
+}
+
+function GetReportOutput {
+	param (
+		[string] $OutParam,
+		[string] $Name,
+		[string] $Dir
+	)
+	if (-not $OutParam) {
+		$ExportDate = Get-Date -Format yyyyMMddHHmmss
+		if ($Name) {
+			$OutParam = "${Domain}.${Name}.${ExportDate}.csv"
+		} else {
+			$OutParam = "${Domain}.${ExportDate}.csv"
+		}
+		if ($Dir) {
+			$OutParam = $Dir + "\" + $OutParam
+		}
+	}
+	$OutParam
+}
+
+function WriteReport {
+	param (
+		[string] $MainJql,
+		[string] $ExtraJql,
+		[string[]] $FieldList
+	)
+	try {
+		$Headers = GetAuthHeader
+		[int] $Start = 0
+		[int] $Max = 100
+		[int] $Total = 0
+		[int] $IssueCount = 0
+		$FieldNames = $FieldList -join ","
+		if ($ExtraJql) {
+			$FinalJQL = "(" + $ExtraJql + ")"
+			if ($MainJql) {
+				$FinalJQL += " and " + $MainJql
+			}
+		} else {
+			$FinalJQL = $MainJql
+		}
+		Write-Host "JQL: `"$FinalJQL`""
+		Write-Host "Fields: `"$FieldNames`""
+		$WriteHeader = $true
+		do {
+			$Json = SearchIssue $Headers $FinalJQL $FieldList $Max $Start
+			$Total = $Json.total
+			$Count = $Json.issues.Count
+			$Start += $Count
+			Write-Progress -Id 1 -Activity "Processing issue 0/${Total}" -PercentComplete 0
+			if ($WriteHeader) {
+				$FieldInfo = GetFieldSchema $Headers
+				WriteCSVHeader $Out $Json.names
+				$WriteHeader = $false
+			}
+			# Save data to CSV
+			foreach ($Issue in $Json.issues) {
+				$IssueKey = $Issue.key
+				WriteCSVEntry $Headers $Out $Json.names $Issue
+				$IssueCount++
+				Write-Progress -Id 1 -Activity "Processing issue ${IssueCount}/${Total}" -PercentComplete ($IssueCount / $Total * 100)
+			}
+		} while ($Start -lt $Total)
+		Write-Progress -Id 1 -Activity "Processed ${Total} issue(s)" -Completed
+		Write-Host "${IssueCount} issue(s) written to ${Out}"
+	} catch {
+		Write-Host $PSItem
+	}
+}
+
 # JiraCred mode
 if ($JiraCred) {
 	if (-not $Out) {
 		$Out = $Domain + $CredExt
 	}
 	try {
-		WriteCred "Enter API token for Jira Cloud $Domain" $UserEmail` $Out
+		WriteCred "Enter API token for Jira Cloud $Domain" $UserEmail $Out
 		Write-Host "Credential file $Out created"
 		Exit 0
 	} catch {
 		Write-Host ${PSItem}
 		Exit 1
 	}
-}
+} 
 
 # Query mode
 if ($Query) {
-	if (-not $Out) {
-		$ExportDate = Get-Date -Format yyyyMMddHHmmss
-		$Out = "SearchIssues.${ExportDate}.csv"
-	}
-	$Headers = GetAuthHeader
-	# Search for issues with JQL
-	try {
-		$Json = SearchIssue $Headers $Jql $Fields
-		Write-Output $Json
+	$Out = GetReportOutput $Out
+	WriteReport $Jql $DateRange $Fields
+	Exit
+}
+
+# Report mode
+if ($Report) {
+	if ($ReportTypeMap.ContainsKey($ReportType)) {
+		$Jql = $ReportTypeMap.Item($ReportType).Jql
+		$Fields = $ReportTypeMap.Item($ReportType).Fields
+		$FieldString = $Fields -join ","
+		$ReportName = $ReportTypeMap.Item($ReportType).Name
+		$Out = GetReportOutput $null $ReportName $ReportDir
+		WriteReport $Jql $DateRange $Fields
 		Exit 0
-	} catch {
-		Write-Host $PSItem
+	} else {
+		Write-Host "Report type `"$ReportType`" is not valid"
 		Exit 1
-	}
+	}	
 }
 
 # Interactive mode
-try {
 if (-not $JiraCredFile) {
 	$JiraCredFile = $Domain + $CredExt
 }
@@ -735,8 +960,40 @@ $Quit = $false
 do {
 	$Option = PrintMenu
 	switch ($Option) {
+		"p" {
+			$NewReportDir = Read-Host "Output Directory"
+			if (Test-Path -Type Container $NewReportDir) {
+				$ReportDir = $NewReportDir
+			} else {
+				Write-Host "`"${NewReportDir}`" is not a valid directory"
+				AnyKeyToContinue
+			}
+			break
+		}
+		"n" {
+			$ReportName = Read-Host "Report Name"
+			break
+		}
+		"t" {
+			Clear-Host
+			Write-Host ================================================================================
+			Write-Host "Current JQL | ${Jql}"
+			Write-Host --------------------------------------------------------------------------------
+			Write-Host "Examples"
+			Write-Host --------------------------------------------------------------------------------
+			Write-Host "No limit                                | Empty string"
+			Write-Host "Created within 5 days                   | Created > -5d"
+			Write-Host "Updated within 10 days                  | Updated > -10d"
+			Write-Host "Expected Deadline is on or before today | `"Expected Deadline`" <= 0d"
+ 			Write-Host "Planned Start Date is a specific date   | `"Planned Start Date`" = 2023-11-01"
+			Write-Host "Actual Start Date is within range       | `"Actual Start Date`" >= 2023-11-01 and `"Actual Start Date`" <= 2023-12-01"
+			Write-Host ================================================================================
+			$DateRange = Read-Host "Date Range JQL"
+			break
+		}
 		"d" {
-			$Domain = Read-Host Domain
+			$Domain = Read-Host "Domain"
+			$JiraCredFile = $Domain + $CredExt
 			break
 		}
 		"c" {
@@ -753,49 +1010,16 @@ do {
 			break
 		}
 		"r" {
-			$Report = SelectReport
-			$Jql = $ReportTypeMap.Item($Report).Jql
+			$ReportType = SelectReport
+			$Jql = $ReportTypeMap.Item($ReportType).Jql
+			$Fields = $ReportTypeMap.Item($ReportType).Fields
+			$ReportName = $ReportTypeMap.Item($ReportType).Name
 			break
 		}
 		"s" {
-			if (-not $Out) {
-				$ExportDate = Get-Date -Format yyyyMMddHHmmss
-				$Out = "SearchIssues.${ExportDate}.csv"
-			}
-			$Headers = GetAuthHeader
-			# Search for issues with JQL
-			$WriteHeader = $true
-			try {
-				[int] $Start = 0
-				[int] $Max = 100
-				[int] $Total = 0
-				[int] $IssueCount = 0
-				do {
-					$Json = SearchIssue $Headers $Jql $Fields $Max $Start
-					$Total = $Json.total
-					$Count = $Json.issues.Count
-					$Start += $Count
-					Write-Progress -Id 1 -Activity "Processing issue 0/${Total}" -PercentComplete 0
-					if ($WriteHeader) {
-						$FieldInfo = GetFieldSchema $Headers
-						WriteCSVHeader $Out $Json.names
-						$WriteHeader = $false
-					}
-					# Save data to CSV
-					foreach ($Issue in $Json.issues) {
-						$IssueKey = $Issue.key
-						WriteCSVEntry $Headers $Out $Json.names $Issue
-						$IssueCount++
-						Write-Progress -Id 1 -Activity "Processing issue ${IssueCount}/${Total}" -PercentComplete ($IssueCount / $Total * 100)
-					}
-				} while ($Start -lt $Total)
-				Write-Progress -Id 1 -Activity "Processed ${Total} issue(s)" -Completed
-			} catch {
-				Write-Host $PSItem
-			}
-			Write-Host "${IssueCount} issue(s) written to ${Out}"
-			Write-Host "Press Any Key to Continue"
-			$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
+			$Out = GetReportOutput $null $ReportName $ReportDir
+			WriteReport $Jql $DateRange $Fields
+			AnyKeyToContinue
 			break
 		}
 		"x" {
@@ -804,6 +1028,3 @@ do {
 		}
 	}
 } while (-not $Quit)
-} catch {
-	Write-Error $PSItem
-}
