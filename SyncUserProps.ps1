@@ -442,7 +442,7 @@ if ($JiraCred) {
 		$Out = $Domain + $CredExt
 	}
 	try {
-		WriteCred "Enter API token for Jira Cloud $Domain" $UserEmail` $Out
+		WriteCred "Enter API token for Jira Cloud $Domain" $UserEmail $Out
 		Write-Host "Credential file $Out created"
 		Exit 0
 	} catch {
