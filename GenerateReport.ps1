@@ -92,7 +92,7 @@ Param(
 	[Parameter(Mandatory, ParameterSetName = "JiraCred")]
 	[Parameter(ParameterSetName = "Query")]
 	[Parameter(ParameterSetName = "Report")]
-	[string] $Domain = "fbhkitsm.atlassian.net",
+	[string] $Domain = "kcwong.atlassian.net",
 	
 	[Parameter(ParameterSetName="Query")]
 	[Parameter(ParameterSetName = "Report")]
@@ -106,13 +106,15 @@ Param(
 	[string] $DateRange = "",
 	
 	[Parameter(Mandatory, ParameterSetName = "Query")]
-	[string] $Jql = "Project = `"Customer Service Request`" Order by Created Desc",
+	[string] $Jql = "Issue = `"PROJ-51`"",
+	#[string] $Jql = "Created >= -10d",
 	
 	[Parameter(ParameterSetName = "Query")] 
-	[System.Collections.ArrayList] $Fields = @("*navigable"),
+	[System.Collections.ArrayList] $Fields = @("*all"),
+	#[System.Collections.ArrayList] $Fields = @("*navigable"),
 	
 	[Parameter(ParameterSetName = "Report")]
-	[string] $ReportDir = ".",
+	[string] $ReportDir = "Report",
 	
 	[Parameter(ParameterSetName = "Query")]
 	[Parameter(ParameterSetName = "JiraCred")]
@@ -477,7 +479,7 @@ function SearchIssue {
 	try {
 		$Uri = "https://" + $Domain + "/rest/api/3/search"
 		$Body = @{
-			"expand" = @("names");
+			"expand" = @("names", "renderedFields");
 			"jql" = $Jql;
 			"fields" = $Fields;
 			"maxResults" = $Max;
@@ -556,6 +558,196 @@ function ParseDateTime {
 	}
 }
 
+function ParseContentNode {
+	param (
+		[PSObject] $Node, 
+		[string] $Prefix = ""
+	)
+	$NL = "`r`n"
+	$Indent = "    "
+	$Result = ""
+	switch ($Node."type") {
+		# Top/child level block nodes
+		"blockquote" {
+			$Result = $NL
+			foreach ($QuoteItem in $Node."content") {
+				$R = ParseContentNode $QuoteItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		"bulletList" {
+			$Result = $NL
+			foreach ($ListItem in $Node."content") {
+				$R = ParseContentNode $ListItem ($Prefix + $Indent)
+				$Result += $Prefix + "* " + $R + $NL
+			}
+			break
+		}
+		"codeBlock" {
+			$Result = $NL
+			foreach ($CodeItem in $Node."content") {
+				$R = ParseContentNode $CodeItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		"heading" {
+			$Result = $NL
+			foreach ($HeadingItem in $Node."content") {
+				$R = ParseContentNode $HeadingItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		"mediaGroup" {
+			# Not translated to text
+			$Result = ""
+			break
+		}
+		"mediaSingle" {
+			# Not translated to text
+			$Result = ""
+			break
+		}
+		"orderedList" {
+			$Result = $NL
+			$Count = 1
+			foreach ($ListItem in $Node."content") {
+				$R = ParseContentNode $ListItem ($Prefix + $Indent)
+				$Result += $Prefix +  + $Count + ") " + $R + $NL
+				$Count++
+			}
+			break
+		}
+		"panel" {
+			$Result = $NL
+			foreach ($PanelItem in $Node."content") {
+				$R = ParseContentNode $PanelItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		"paragraph" {
+			$Result = ""
+			$Count = 0
+			foreach ($ParagraphItem in $Node."content") {
+				$Count++
+				$R = ParseContentNode $ParagraphItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		"rule" {
+			$Result = $NL
+			break
+		}
+		"table" {
+			$Result = ""
+			foreach ($TableItem in $Node."content") {
+				$R = ParseContentNode $TableItem $Prefix
+				$Result += $Prefix + $R + $NL
+			}
+			break
+		}
+		# Child block nodes
+		"listItem" {
+			$Result = ""
+			foreach ($ListItem in $Node."content") {
+				$R = ParseContentNode $ListItem $Prefix
+				$Result += $Prefix + $R
+			}
+			break
+		}
+		"media" {
+			# Not translated to text
+			$Result = ""
+			break
+		}
+		{$_ -eq "tableCell" -or $_ -eq "tableHeader"} {
+			$Result = ""
+			foreach ($Row in $Node."content") {
+				$R = ParseContentNode $Row $Prefix
+				$Result += $Prefix + $R
+			}
+			break
+		}
+		"tableRow" {
+			$Result = $Prefix
+			foreach ($Row in $Node."content") {
+				$R = ParseContentNode $Row $Prefix
+				$Result += "|" + $R
+			}
+			# Add trailing separator
+			if ($Result.Length -ge 1) {
+				$Result += "|"
+			}
+			break
+		}
+		# Inline nodes
+		"emoji" {
+			$Result = $Node."attrs"."shortName"
+			break
+		}
+		"hardBreak" {
+			$Result = "`r`n"
+			break
+		}
+		"inlineCard" {
+			$Result = $Node."attrs"."url"
+			break
+		}
+		"mention" {
+			$Result = $Node."attrs"."text" + " (" + $Node."attrs"."id" + ")"
+			break
+		}
+		"text" {
+			# Check markup
+			$IsHyperLink = $False
+			if ($Node."marks") {
+				foreach ($Mark in $Node."marks") {
+					if ($Mark."type" -eq "link") {
+						$Result = $Node."text" + " (" + $Mark."attrs"."href" + ")"
+						$IsHyperLink = $True
+						break
+					}
+				}
+			}
+			if (-not $IsHyperLink) {
+				$Result = $Node."text"
+			}
+			break
+		}
+		default {
+			$Msg = "Node type `"" + $Node."type" + "`" is not supported"
+			throw $Msg
+		}
+	}
+	return $Result
+}
+
+# Helper function to convert Jira Document structure into text
+# https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
+function ParseContent {
+	param (
+		[PSObject] $ContentJSON
+	)
+	$Result = ""
+	# Check version
+	if ($ContentJSON."version" -ne 1) {
+		# Unsupported Format
+		throw "Jira document version `"" + $ContentJSON."version" + "`" is not supported"
+	}
+	# Check type, root node should be "doc"
+	if ($ContentJSON."type" -ne "doc") {
+		throw "Jira document type `"" + $ContentJSON."type" + "`" is not supported"
+	}
+	foreach ($Item in $ContentJSON."content") {
+		$Result += ParseContentNode $Item
+	}
+	$Result
+}
+
 function ParseFieldValue {
 	param (
 		[hashtable] $Headers,
@@ -563,6 +755,7 @@ function ParseFieldValue {
 		[string] $Items,
 		[PSObject] $FieldValue
 	)
+	$NL = "`r`n"
 	$Result = ""
 	if ($FieldValue -ne $null -and $FieldValue -ne "") {
 		switch ($Type) {
@@ -594,7 +787,7 @@ function ParseFieldValue {
 			}
 			"issuelinks" {
 				foreach ($Link in $FieldValue) {
-					$Result += "`r`n"
+					$Result += $NL
 					if ($Link."outwardIssue") {
 						$Result += $Link."type"."outward" + " " + $Link."outwardIssue"."key"
 					} elseif ($Link."inwardIssue") {
@@ -649,7 +842,7 @@ function ParseFieldValue {
 			"sd-servicelevelagreement" {
 				if ($FieldValue."completedCycles") {
 					foreach ($Cycle in $FieldValue."completedCycles") {
-						$Result += "`r`n"
+						$Result += $NL
 						$StartTime = ParseDateTime $Cycle."startTime"."jira"
 						$StopTime = ParseDateTime $Cycle."stopTime"."jira"
 						$BreachTime = ParseDateTime $Cycle."breachTime"."jira"
@@ -664,7 +857,7 @@ function ParseFieldValue {
 					}
 				}
 				if ($FieldValue."ongoingCycle") {
-					$Result += "`r`n"
+					$Result += $NL
 					$StartTime = ParseDateTime $FieldValue."ongoingCycle"."startTime"."jira"
 					$BreachTime = ParseDateTime $FieldValue."ongoingCycle"."breachTime"."jira"
 					$Breached = $FieldValue."breached"
@@ -688,19 +881,10 @@ function ParseFieldValue {
 			"string" {
 				# Special handling for paragraph types
 				if ($FieldValue."content") {
-					# Concat all text found
-					foreach ($ContentItem in $FieldValue."content") {
-						$Result += "`r`n"
-						if ($ContentItem."type" -in ("paragraph", "codeBlock", "mention")) {
-							foreach ($SubContentItem in $ContentItem."content") {
-								$Result += $SubContentItem."text"
-							}
-						} elseif ($ContentItem."type" -in ("text")) {
-							$Result += $ContentItem."text"
-						}
-					}
-					if ($Result.Length -gt 2) {
-						$Result = $Result.Substring(2)
+					try {
+						$Result = ParseContent $FieldValue
+					} catch {
+						$Result = $PSItem
 					}
 				} else {
 					# Simple string
@@ -786,15 +970,19 @@ function WriteCSVEntry {
 	$Line = ""
 	foreach ($Item in ($Names.PSObject.Properties | Sort-Object)) {
 		$FieldId = $Item.Name
-		if ($Issue.fields."$FieldId") {
-			$FieldValue = $Issue.fields."$FieldId"
+		if ($Issue.renderedFields."$FieldId") {
+			$ParsedValue = $Issue.renderedFields."$FieldId"
 		} else {
-			# Certain fields like key are at issue level
-			$FieldValue = $Issue."$FieldId"
+			if ($Issue.fields."$FieldId") {
+				$FieldValue = $Issue.fields."$FieldId"
+			} else {
+				# Certain fields like "key" are at issue level
+				$FieldValue = $Issue."$FieldId"
+			}
+			$Type = $FieldInfo."$FieldId".schema.type
+			$Items = $FieldInfo."$FieldId".schema.items
+			$ParsedValue = ParseFieldValue $Headers $Type $Items $FieldValue
 		}
-		$Type = $FieldInfo."$FieldId".schema.type
-		$Items = $FieldInfo."$FieldId".schema.items
-		$ParsedValue = ParseFieldValue $Headers $Type $Items $FieldValue
 		# Escape double quotes
 		$CSVValue = $ParsedValue -replace '"', '""'
 		#Write-Output "${FieldId}.${Type}.${Items}=`"${CSVValue}`""
